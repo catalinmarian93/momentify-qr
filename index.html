@@ -1,251 +1,268 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Momentify — QR Gallery (Prototype)</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f7fafc; color:#111827; margin:0; }
-    .container{ max-width: 860px; margin: 0 auto; padding: 24px; }
-    .card{ background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:16px; }
-    .btn{ border:1px solid #e5e7eb; background:#fff; padding:10px 14px; border-radius:12px; cursor:pointer }
-    .btn.primary{ background:#111; color:#fff; border-color:#111 }
-    .grid{ display:grid; gap:12px }
-    .grid-2{ grid-template-columns: 1fr 1fr }
-    .muted{ color:#6b7280; font-size:12px }
-    .badge{ font-size:11px; color:#6b7280; letter-spacing:.08em; text-transform:uppercase }
-    .qr{ padding:8px; border:1px solid #e5e7eb; border-radius:12px; background:#fff }
-    .thumb{ border-radius:12px; overflow:hidden; border:1px solid #e5e7eb }
-    .thumb img{ width:100%; height:160px; object-fit:cover }
-    .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap }
-    input[type="text"]{ padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; width:100% }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break:break-all; background:#f3f4f6; padding:6px 8px; border-radius:8px }
+    :root { --b:#111827; --m:#6b7280; --bg:#f7fafc; --bd:#e5e7eb; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--b); }
+    .wrap { max-width:860px; margin:0 auto; padding:24px; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .card { background:#fff; border:1px solid var(--bd); border-radius:16px; padding:16px; }
+    .btn { border:1px solid var(--bd); background:#fff; padding:10px 14px; border-radius:12px; cursor:pointer; }
+    .btn.primary { background:#111; color:#fff; border-color:#111; }
+    .badge { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--m); }
+    .muted { color:var(--m); font-size:12px; }
+    .grid { display:grid; gap:12px; }
+    .grid-2 { grid-template-columns: 1fr 1fr; }
+    .qr { border:1px solid var(--bd); border-radius:12px; padding:8px; background:#fff; }
+    input[type="text"]{ padding:10px 12px; border:1px solid var(--bd); border-radius:10px; width:100% }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break:break-all; background:#f3f4f6; padding:6px 8px; border-radius:8px }
+    .thumb { border:1px solid var(--bd); border-radius:12px; overflow:hidden; }
+    .thumb img { width:100%; height:160px; object-fit:cover; display:block; }
+    .thumb figcaption { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; }
   </style>
+  <!-- Tiny QR library (no build needed) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
 </head>
 <body>
-  <div id="root"></div>
+  <div class="wrap">
+    <header class="row" style="justify-content:space-between">
+      <div>
+        <h1 style="margin:0 0 4px 0; font-size:24px">Momentify — QR Gallery (Prototype)</h1>
+        <div class="muted">Flow: New Event → scan QR with phone camera → View Gallery / Take Picture</div>
+      </div>
+      <button id="newEventBtn" class="btn primary">New Event</button>
+    </header>
 
-  <script type="module">
-    import React, {useEffect,useState,useRef} from 'https://esm.sh/react@18';
-    import {createRoot} from 'https://esm.sh/react-dom@18/client';
-    import QRCode from 'https://esm.sh/react-qr-code@2?external=react,react-dom';
-
-    const uid = () => Math.random().toString(36).slice(2,8).toUpperCase();
-    const now = () => new Date().toISOString();
-    const STORAGE_PREFIX = 'momentify:event:';
-    const photoKey = (e) => STORAGE_PREFIX+e+':photos';
-    const metaKey  = (e) => STORAGE_PREFIX+e+':meta';
-
-    const loadPhotos = (e)=>{ try{ return JSON.parse(localStorage.getItem(photoKey(e))||'[]'); }catch{return []} };
-    const savePhotos = (e,p)=> localStorage.setItem(photoKey(e), JSON.stringify(p));
-    const loadMeta   = (e)=>{ try{ return JSON.parse(localStorage.getItem(metaKey(e))||'{}')||{} }catch{return {}} };
-    const saveMeta   = (e,m)=> localStorage.setItem(metaKey(e), JSON.stringify(m));
-
-    function useQueryParam(key){
-      const get=()=> new URLSearchParams(location.search).get(key);
-      const [v,setV]=useState(get());
-      useEffect(()=>{ const onPop=()=>setV(get()); addEventListener('popstate',onPop); return ()=>removeEventListener('popstate',onPop)},[key]);
-      return [v,(val)=>{
-        const sp=new URLSearchParams(location.search);
-        if(!val) sp.delete(key); else sp.set(key,val);
-        const url=`${location.pathname}?${sp.toString()}`;
-        history.pushState({},'',url);
-        setV(val);
-      }];
-    }
-
-    function CameraCapture({onCapture,onCancel}){
-      const videoRef=useRef(null), canvasRef=useRef(null);
-      const [err,setErr]=useState('');
-      const streamRef=useRef(null);
-      useEffect(()=>{ (async()=>{
-        try{
-          const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
-          streamRef.current=st;
-          if(videoRef.current){ videoRef.current.srcObject=st; await videoRef.current.play(); }
-        }catch(e){ setErr('Camera access failed. Use Upload below.'); }
-      })(); return ()=>{ if(streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop()); }},[]);
-      const snap=()=>{ const v=videoRef.current, c=canvasRef.current; if(!v||!c) return;
-        c.width=v.videoWidth; c.height=v.videoHeight; const ctx=c.getContext('2d'); ctx.drawImage(v,0,0,c.width,c.height);
-        onCapture(c.toDataURL('image/jpeg',0.9)); };
-      const onUpload=(e)=>{ const f=e.target.files?.[0]; if(!f) return; const r=new FileReader(); r.onload=()=>onCapture(r.result); r.readAsDataURL(f); };
-      return (<div>
-        <div className="thumb" style="height:auto">
-          {err ? <div className="muted" style="padding:16px;color:#ef4444;text-align:center">{err}</div>
-               : <video ref={videoRef} playsInline muted style="width:100%;height:auto;object-fit:contain"></video>}
+    <section id="activeEvent" class="card" style="margin-top:16px; display:none">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div class="badge">Active Event</div>
+          <div id="eventTitle" style="font-weight:600; margin-top:4px"></div>
+          <div class="muted">ID: <span id="eventIdText"></span></div>
         </div>
-        <canvas ref={canvasRef} style="display:none"></canvas>
-        <div className="row" style="margin-top:12px">
-          <button className="btn primary" onclick="${''}" id="snap">Take picture</button>
-          <label className="btn">Upload from device
-            <input type="file" accept="image/*" style="display:none" id="upl"/>
-          </label>
-          <button className="btn" id="cancel">Cancel</button>
-        </div>
-        <div className="muted" style="margin-top:6px">Tip: iOS requires HTTPS for camera.</div>
-      </div>);
-    }
-
-    function App(){
-      const [eventIdParam,setEventIdParam]=useQueryParam('e');
-      const [activeEventId,setActiveEventId]=useState(eventIdParam||'');
-      const [mode,setMode]=useState('home'); // home | gallery | capture | setup
-      const [photos,setPhotos]=useState([]);
-      const [name,setName]=useState('');
-
-      useEffect(()=>{ if(eventIdParam && eventIdParam!==activeEventId){ setActiveEventId(eventIdParam); setMode('gallery'); }},[eventIdParam]);
-      useEffect(()=>{ if(!activeEventId) return; setPhotos(loadPhotos(activeEventId)); },[activeEventId,mode]);
-
-      const eventMeta = activeEventId ? loadMeta(activeEventId) : {};
-
-      const ensureEvent=()=>{ if(activeEventId) return activeEventId;
-        const id=uid(); setActiveEventId(id); setEventIdParam(id);
-        saveMeta(id,{id, title:`Momentify Gallery ${id}`, createdAt:now()}); return id; };
-
-      const createNewEvent=()=>{ const id=uid(); setActiveEventId(id); setEventIdParam(id);
-        saveMeta(id,{id, title:`Momentify Gallery ${id}`, createdAt:now()}); setMode('setup'); };
-
-      const addPhoto=(dataUrl)=>{ const id=ensureEvent();
-        const entry={id:uid(), by:name||'Guest', at:now(), dataUrl};
-        const list=[entry, ...loadPhotos(id)]; savePhotos(id,list); setPhotos(list); setMode('gallery'); };
-
-      const shareUrl = activeEventId
-        ? `${location.origin}${location.pathname}?e=${activeEventId}`
-        : `${location.origin}${location.pathname}`;
-
-      const clearDemoData=()=>{ if(!activeEventId) return; if(confirm('Delete all photos in this demo gallery?')){ savePhotos(activeEventId,[]); setPhotos([]); } };
-      const renameEvent=()=>{ const title=prompt('Gallery name', eventMeta.title||'Event Gallery'); if(title && activeEventId){ saveMeta(activeEventId, {...eventMeta, title}); }}
-
-      return (<div className="container">
-        <header className="row" style="justify-content:space-between">
-          <div>
-            <h1 style="margin:0 0 4px 0">Momentify — QR Gallery (Prototype)</h1>
-            <div className="muted">Flow: New Gallery → scan QR with phone camera → View/Take Picture</div>
+        <div class="row">
+          <div class="qr"><div id="qr"></div></div>
+          <div class="muted" style="max-width:220px">
+            <div style="font-weight:600; color:#111">Figurine QR (simulated)</div>
+            Scan with the phone camera to open the event link.
           </div>
-          <button className="btn primary" onclick={()=>createNewEvent()}>New Gallery</button>
-        </header>
-
-        {activeEventId && (
-          <div className="card" style="margin-top:16px">
-            <div className="row" style="justify-content:space-between">
-              <div>
-                <div className="badge">Active Gallery</div>
-                <div style="font-weight:600;margin-top:4px">{(loadMeta(activeEventId).title)||`Gallery ${activeEventId}`}</div>
-                <div className="muted">ID: {activeEventId}</div>
-              </div>
-              <div className="row">
-                <div className="qr"><QRCode value={shareUrl} size="84"/></div>
-                <div className="muted" style="max-width:220px">
-                  <div style="font-weight:600;color:#111">Figurine QR (simulated)</div>
-                  Scan with phone camera to open the gallery link.
-                </div>
-              </div>
-            </div>
-            <div className="row" style="margin-top:8px">
-              <button className="btn" onclick={()=>navigator.clipboard.writeText(shareUrl)}>Copy Link</button>
-              <button className="btn" onclick={()=>renameEvent()}>Rename</button>
-              <button className="btn" style="color:#b91c1c;border-color:#fecaca;background:#fff5f5" onclick={()=>clearDemoData()}>Clear Photos</button>
-            </div>
-          </div>
-        )}
-
-        <div className="grid grid-2" style="margin-top:16px">
-          <button className="card btn" onclick={()=>setMode('gallery')}>
-            <div style="font-size:18px;font-weight:600">View Gallery</div>
-            <div className="muted" style="margin-top:4px">See photos for this event only.</div>
-          </button>
-          <button className="card btn" onclick={()=>setMode('capture')}>
-            <div style="font-size:18px;font-weight:600">Take Picture</div>
-            <div className="muted" style="margin-top:4px">Add a photo to this event.</div>
-          </button>
         </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="copyLinkBtn" class="btn">Copy Link</button>
+        <button id="renameBtn" class="btn">Rename</button>
+        <button id="clearBtn" class="btn" style="color:#b91c1c; border-color:#fecaca; background:#fff5f5">Clear Photos</button>
+      </div>
+    </section>
 
-        <div className="card" style="margin-top:12px">
-          <div style="font-weight:600;font-size:14px;margin-bottom:6px">Event link (for native camera QR scan)</div>
-          <div className="muted">Share this link. Scanning the QR opens it with the event ID.</div>
-          <div className="mono" style="margin-top:6px">{shareUrl}</div>
-        </div>
+    <section class="grid grid-2" style="margin-top:16px">
+      <button id="viewBtn" class="card btn">
+        <div style="font-size:18px; font-weight:600">View Gallery</div>
+        <div class="muted" style="margin-top:4px">See photos for this event only.</div>
+      </button>
+      <button id="takeBtn" class="card btn">
+        <div style="font-size:18px; font-weight:600">Take Picture</div>
+        <div class="muted" style="margin-top:4px">Add a photo to this event.</div>
+      </button>
+    </section>
 
-        <div className="card" style="margin-top:12px">
-          <div style="font-weight:600;font-size:14px;margin-bottom:6px">Your name (optional)</div>
-          <input type="text" placeholder="e.g., Ana / Photographer" value={name} oninput={(e)=>setName(e.target.value)} />
-        </div>
+    <section class="card" style="margin-top:12px">
+      <div style="font-weight:600; font-size:14px; margin-bottom:6px">Event link (for native camera QR scan)</div>
+      <div class="muted">Share this link. Scanning the QR opens it with the event ID.</div>
+      <div id="shareUrl" class="mono" style="margin-top:6px"></div>
+    </section>
 
-        <div style="margin-top:16px">
-          {mode==='gallery' && (
-            <section>
-              <div className="row" style="justify-content:space-between;margin-bottom:8px">
-                <div style="font-size:18px;font-weight:600">Gallery</div>
-                <div className="row">
-                  <button className="btn primary" onclick={()=>setMode('capture')}>Add photo</button>
-                  <a className="btn" href={shareUrl} target="_blank" rel="noreferrer">Open in new tab</a>
-                </div>
-              </div>
-              {!activeEventId && <div className="card">No gallery yet. Create or join one above.</div>}
-              {activeEventId && photos.length===0 && <div className="card">No photos yet — be the first to add one!</div>}
-              {activeEventId && photos.length>0 && (
-                <div className="grid" style="grid-template-columns:repeat( auto-fill, minmax(150px, 1fr) );">
-                  {photos.map(p => (
-                    <figure className="thumb">
-                      <img src={p.dataUrl} alt="moment" />
-                      <figcaption style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px" className="muted">
-                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">{p.by}</span>
-                        <time className="mono">{new Date(p.at).toLocaleTimeString()}</time>
-                      </figcaption>
-                    </figure>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
+    <section class="card" style="margin-top:12px">
+      <div style="font-weight:600; font-size:14px; margin-bottom:6px">Your name (optional)</div>
+      <input id="nameInput" type="text" placeholder="e.g., Ana / Photographer" />
+    </section>
 
-          {mode==='capture' && (
-            <section>
-              <div style="font-size:18px;font-weight:600;margin-bottom:8px">Take a picture</div>
-              <div id="cam"></div>
-            </section>
-          )}
+    <section id="gallerySec" style="margin-top:16px">
+      <!-- Filled dynamically -->
+    </section>
 
-          {mode==='setup' && (
-            <section className="card">
-              <div style="font-size:18px;font-weight:600">Gallery created</div>
-              <div className="muted" style="margin-top:6px">Share the QR or link below. Anyone scanning lands in this gallery.</div>
-              <div className="row" style="margin-top:12px">
-                <div className="qr"><QRCode value={shareUrl} size="128"/></div>
-                <div>
-                  <div style="font-weight:600">Share link</div>
-                  <a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a>
-                  <div style="margin-top:8px"><button className="btn" onclick={()=>navigator.clipboard.writeText(shareUrl)}>Copy link</button></div>
-                </div>
-              </div>
-              <div className="row" style="margin-top:12px">
-                <button className="btn primary" onclick={()=>setMode('gallery')}>Go to Gallery</button>
-                <button className="btn" onclick={()=>setMode('capture')}>Add a Photo</button>
-              </div>
-            </section>
-          )}
-        </div>
-
-        <div className="muted" style="text-align:center;margin-top:18px">
-          Prototype stores photos locally per event in your browser. For multi-device sync later, plug in Supabase/Firebase.
-        </div>
-      </div>);
-    }
-
-    // Mount app
-    const root = createRoot(document.getElementById('root'));
-    root.render(React.createElement(App));
-  </script>
+    <!-- Hidden input for camera/upload (simplest + most stable on iOS/Android) -->
+    <input id="fileInput" type="file" accept="image/*" capture="environment" style="display:none" />
+  </div>
 
   <script>
-    // Mount CameraCapture lazily into #cam when needed (keeps it simple for this 1-file setup)
-    const camContainer = new MutationObserver(() => {
-      const target = document.querySelector('#cam');
-      if (target && !target.dataset.mounted && window.React && window.ReactDOM) {
-        target.dataset.mounted = '1';
+    // ----------------------- Helpers & Storage -----------------------
+    const uid = () => Math.random().toString(36).slice(2,8).toUpperCase();
+    const now = () => new Date().toISOString();
+    const P = 'momentify:event:'; // prefix
+    const photoKey = (e) => P + e + ':photos';
+    const metaKey  = (e) => P + e + ':meta';
+
+    const loadPhotos = (e) => { try { return JSON.parse(localStorage.getItem(photoKey(e)) || '[]'); } catch { return []; } };
+    const savePhotos = (e, list) => localStorage.setItem(photoKey(e), JSON.stringify(list));
+    const loadMeta   = (e) => { try { return JSON.parse(localStorage.getItem(metaKey(e)) || '{}') || {}; } catch { return {}; } };
+    const saveMeta   = (e, m) => localStorage.setItem(metaKey(e), JSON.stringify(m));
+
+    const qs = new URLSearchParams(location.search);
+    let activeEventId = (qs.get('e') || '').toUpperCase();
+
+    // ----------------------- UI Elements -----------------------
+    const activeEventEl = document.getElementById('activeEvent');
+    const eventTitleEl  = document.getElementById('eventTitle');
+    const eventIdTextEl = document.getElementById('eventIdText');
+    const shareUrlEl    = document.getElementById('shareUrl');
+    const nameInput     = document.getElementById('nameInput');
+    const gallerySec    = document.getElementById('gallerySec');
+    const fileInput     = document.getElementById('fileInput');
+
+    const newEventBtn   = document.getElementById('newEventBtn');
+    const copyLinkBtn   = document.getElementById('copyLinkBtn');
+    const renameBtn     = document.getElementById('renameBtn');
+    const clearBtn      = document.getElementById('clearBtn');
+    const viewBtn       = document.getElementById('viewBtn');
+    const takeBtn       = document.getElementById('takeBtn');
+
+    // ----------------------- Core -----------------------
+    function setQueryParam(key, val) {
+      const sp = new URLSearchParams(location.search);
+      if (!val) sp.delete(key); else sp.set(key, val);
+      const url = location.pathname + '?' + sp.toString();
+      history.pushState({}, '', url);
+    }
+
+    function ensureEvent() {
+      if (activeEventId) return activeEventId;
+      const id = uid();
+      activeEventId = id;
+      setQueryParam('e', id);
+      saveMeta(id, { id, title: 'Momentify Gallery ' + id, createdAt: now() });
+      renderAll();
+      return id;
+    }
+
+    function shareUrlForCurrent() {
+      const base = location.origin + location.pathname;
+      return activeEventId ? `${base}?e=${activeEventId}` : base;
+    }
+
+    function renderHeader() {
+      if (!activeEventId) {
+        activeEventEl.style.display = 'none';
+        shareUrlEl.textContent = shareUrlForCurrent();
+        return;
+      }
+      const meta = loadMeta(activeEventId);
+      activeEventEl.style.display = '';
+      eventTitleEl.textContent = meta.title || ('Gallery ' + activeEventId);
+      eventIdTextEl.textContent = activeEventId;
+      shareUrlEl.textContent = shareUrlForCurrent();
+
+      // Render QR
+      const qrBox = document.getElementById('qr');
+      qrBox.innerHTML = '';
+      new QRCode(qrBox, { text: shareUrlForCurrent(), width: 84, height: 84, correctLevel: QRCode.CorrectLevel.M });
+    }
+
+    function renderGallery() {
+      if (!activeEventId) {
+        gallerySec.innerHTML = '<div class="card">No event selected yet. Click <b>New Event</b> to start.</div>';
+        return;
+      }
+      const photos = loadPhotos(activeEventId);
+      if (!photos.length) {
+        gallerySec.innerHTML = '<div class="card">No photos yet — be the first to add one!</div>';
+        return;
+      }
+      const grid = document.createElement('div');
+      grid.className = 'grid';
+      grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(150px, 1fr))';
+      photos.forEach(p => {
+        const fig = document.createElement('figure');
+        fig.className = 'thumb';
+        const img = document.createElement('img');
+        img.src = p.dataUrl;
+        img.alt = 'moment';
+        const cap = document.createElement('figcaption');
+        cap.className = 'muted';
+        const left = document.createElement('span');
+        left.textContent = (p.by || 'Guest');
+        left.style.maxWidth = '120px';
+        left.style.overflow = 'hidden';
+        left.style.textOverflow = 'ellipsis';
+        left.style.whiteSpace = 'nowrap';
+        const t = document.createElement('time');
+        t.className = 'mono';
+        t.textContent = new Date(p.at).toLocaleTimeString();
+        cap.append(left, t);
+        fig.append(img, cap);
+        grid.append(fig);
+      });
+      gallerySec.innerHTML = '';
+      gallerySec.append(grid);
+    }
+
+    function renderAll() {
+      renderHeader();
+      renderGallery();
+    }
+
+    // ----------------------- Actions -----------------------
+    newEventBtn.addEventListener('click', () => {
+      const id = uid();
+      activeEventId = id;
+      setQueryParam('e', id);
+      saveMeta(id, { id, title: 'Momentify Gallery ' + id, createdAt: now() });
+      renderAll();
+    });
+
+    copyLinkBtn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(shareUrlForCurrent());
+      alert('Link copied!');
+    });
+
+    renameBtn.addEventListener('click', () => {
+      if (!activeEventId) return;
+      const meta = loadMeta(activeEventId);
+      const next = prompt('Gallery name', meta.title || 'Event Gallery');
+      if (next) { saveMeta(activeEventId, { ...meta, title: next }); renderAll(); }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      if (!activeEventId) return;
+      if (confirm('Delete all photos in this demo gallery?')) {
+        savePhotos(activeEventId, []);
+        renderAll();
       }
     });
-    camContainer.observe(document.body, { childList: true, subtree: true });
+
+    viewBtn.addEventListener('click', () => {
+      if (!activeEventId) alert('Create or open an event first.');
+      renderGallery();
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    });
+
+    takeBtn.addEventListener('click', () => {
+      const id = ensureEvent(); // makes sure we have an event
+      // simplest + most compatible: trigger file input (camera on phones)
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file || !activeEventId) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        const name = document.getElementById('nameInput').value || 'Guest';
+        const list = [{ id: uid(), by: name, at: now(), dataUrl }, ...loadPhotos(activeEventId)];
+        savePhotos(activeEventId, list);
+        renderGallery();
+      };
+      reader.readAsDataURL(file);
+      // reset so the same file can be chosen again if needed
+      e.target.value = '';
+    });
+
+    // ----------------------- Init -----------------------
+    renderAll();
   </script>
 </body>
 </html>
