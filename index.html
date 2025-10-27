@@ -32,6 +32,7 @@
         <div class="muted">Flow: New Event → scan QR → everyone sees shared photos for that event</div>
       </div>
       <button id="newEventBtn" class="btn primary">New Event</button>
+      <button id="eventsBtn" class="btn">View Past Events</button>
     </header>
 
     <section id="activeEvent" class="card" style="margin-top:16px; display:none">
@@ -79,7 +80,15 @@
 
     <section id="gallerySec" style="margin-top:16px"></section>
 
-    <input id="fileInput" type="file" accept="image/*" capture="environment" style="display:none" />
+    <section id="eventsSec" style="margin-top:16px; display:none">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <h2 style="margin:0">Past Events</h2>
+    <button id="hideEventsBtn" class="btn">Hide</button>
+  </div>
+  <div id="eventsGrid" style="margin-top:12px"></div>
+</section>
+
+    <input id="fileInput" type="file" accept="image/*,video/*" capture style="display:none" />
   </div>
 
   <script>
@@ -90,6 +99,55 @@
     // =============================================
 
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+    // ---- EVENTS table helpers ----
+async function createEventRow(id, title) {
+  const { error } = await sb.from('events').insert({ id, title });
+  if (error) { console.error(error); /* continue even if fails */ }
+}
+
+async function updateEventTitleRow(id, title) {
+  const { error } = await sb.from('events').update({ title }).eq('id', id);
+  if (error) { console.error(error); }
+}
+
+// Fetch a list of events (newest first) and enrich with count + cover
+async function listEventsWithMeta(limit = 200) {
+  const { data: events, error } = await sb
+    .from('events')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) { console.error(error); return []; }
+
+  async function getCount(eid) {
+    const { count, error } = await sb
+      .from('photos').select('id', { count: 'exact', head: true })
+      .eq('event_id', eid);
+    if (error) { console.error(error); return 0; }
+    return count || 0;
+  }
+
+  async function getCover(eid) {
+    const { data, error } = await sb
+      .from('photos')
+      .select('*')
+      .eq('event_id', eid)
+      .order('at', { ascending: false })
+      .limit(1);
+    if (error || !data || !data.length) return { url: '', at: null };
+    const row = data[0];
+    const url = sb.storage.from(BUCKET).getPublicUrl(row.path).data.publicUrl;
+    return { url, at: row.at };
+  }
+
+  const out = [];
+  for (const ev of events) {
+    const [total, cover] = await Promise.all([getCount(ev.id), getCover(ev.id)]);
+    out.push({ id: ev.id, title: ev.title || ('Gallery ' + ev.id), total, cover });
+  }
+  return out;
+}
 
     // Tiny helpers
     const uid = () => Math.random().toString(36).slice(2,8).toUpperCase();
@@ -145,8 +203,19 @@
     }
 
     async function uploadPhoto(eventId, file, by) {
-      const id = uid();
-      const path = `${eventId}/${id}.jpg`;
+  const id = uid();
+  const ext = (file.type && file.type.split('/')[1]) ? file.type.split('/')[1] : 'jpg';
+  const path = `${eventId}/${id}.${ext}`;
+  const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, {
+    upsert: false,
+    contentType: file.type || 'application/octet-stream'
+  });
+  if (upErr) throw upErr;
+  const { error: insErr } = await sb.from('photos').insert({ event_id: eventId, by, path });
+  if (insErr) throw insErr;
+  return path;
+}
+
       // upload file
       const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, { upsert: false, contentType: file.type || 'image/jpeg' });
       if (upErr) throw upErr;
@@ -165,55 +234,172 @@
       setQR(shareUrlForCurrent());
     }
 
-    async function renderGallery() {
-      gallerySec.innerHTML = '<div class="card muted">Loading…</div>';
-      if (!activeEventId) {
-        gallerySec.innerHTML = '<div class="card">No event selected yet. Click <b>New Event</b> to start.</div>';
-        return;
-      }
-      const photos = await listPhotos(activeEventId);
-      if (!photos.length) {
-        gallerySec.innerHTML = '<div class="card">No photos yet — be the first to add one!</div>';
-        return;
-      }
-      const grid = document.createElement('div');
-      grid.className = 'grid';
-      grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(150px, 1fr))';
-      photos.forEach(p => {
-        const fig = document.createElement('figure'); fig.className = 'thumb';
-        const img = document.createElement('img'); img.src = p.url; img.alt='moment';
-        const cap = document.createElement('figcaption'); cap.className = 'muted';
-        const left = document.createElement('span'); left.textContent = (p.by || 'Guest'); left.style.maxWidth='120px'; left.style.overflow='hidden'; left.style.textOverflow='ellipsis'; left.style.whiteSpace='nowrap';
-        const t = document.createElement('time'); t.className='mono'; t.textContent = new Date(p.at).toLocaleTimeString();
-        cap.append(left, t); fig.append(img, cap); grid.append(fig);
-      });
-      gallerySec.innerHTML = ''; gallerySec.append(grid);
+    function isVideoURL(url) {
+  return /\.(mp4|mov|webm|ogg|mkv)$/i.test(url) || url.includes('video');
+}
+
+async function renderGallery() {
+  gallerySec.innerHTML = '<div class="card muted">Loading…</div>';
+  if (!activeEventId) {
+    gallerySec.innerHTML = '<div class="card">No event selected yet. Click <b>New Event</b> to start.</div>';
+    return;
+  }
+
+  const photos = await listPhotos(activeEventId);
+  if (!photos.length) {
+    gallerySec.innerHTML = '<div class="card">No media yet — be the first to add one!</div>';
+    return;
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'grid';
+  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(180px, 1fr))';
+
+  photos.forEach(p => {
+    const fig = document.createElement('figure');
+    fig.className = 'thumb';
+
+    // 👇 NEW: choose <video> for videos, <img> for images
+    let media;
+    if (isVideoURL(p.url)) {
+      media = document.createElement('video');
+      media.src = p.url;
+      media.controls = true;      // show play controls
+      media.playsInline = true;   // better on iOS
+    } else {
+      media = document.createElement('img');
+      media.src = p.url;
+      media.alt = 'moment';
     }
 
+    const cap = document.createElement('figcaption');
+    cap.className = 'muted';
+
+    const left = document.createElement('span');
+    left.textContent = (p.by || 'Guest');
+    left.style.maxWidth = '120px';
+    left.style.overflow = 'hidden';
+    left.style.textOverflow = 'ellipsis';
+    left.style.whiteSpace = 'nowrap';
+
+    const t = document.createElement('time');
+    t.className = 'mono';
+    t.textContent = new Date(p.at).toLocaleTimeString();
+
+    cap.append(left, t);
+    fig.append(media, cap);
+    grid.append(fig);
+  });
+
+  gallerySec.innerHTML = '';
+  gallerySec.append(grid);
+}
+
+function qrURLFor(eventId) {
+  const link = `${location.origin}${location.pathname}?e=${eventId}`;
+  return 'https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=' + encodeURIComponent(link);
+}
+
+async function renderEventsList() {
+  const box = document.getElementById('eventsGrid');
+  box.innerHTML = '<div class="card muted">Loading events…</div>';
+
+  const items = await listEventsWithMeta();
+  if (!items.length) {
+    box.innerHTML = '<div class="card">No events yet. Click <b>New Event</b> to create one.</div>';
+    return;
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'grid';
+  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(180px, 1fr))';
+
+  items.forEach(ev => {
+    const fig = document.createElement('figure'); fig.className = 'thumb';
+    // media
+    if (ev.cover.url) {
+      const media = document.createElement(isVideoURL(ev.cover.url) ? 'video' : 'img');
+      media.src = ev.cover.url;
+      if (media.tagName === 'VIDEO') media.controls = true;
+      fig.appendChild(media);
+    } else {
+      const ph = document.createElement('div');
+      ph.style.cssText = "height:180px;display:flex;align-items:center;justify-content:center;background:#f8fafc;color:#94a3b8;font-size:12px";
+      ph.textContent = "No media yet";
+      fig.appendChild(ph);
+    }
+    // caption
+    const cap = document.createElement('figcaption'); cap.className = 'muted';
+    const left = document.createElement('div');
+    left.innerHTML = `<div style="font-weight:600;color:#111">${ev.title}</div>
+                      <div>${ev.total} item${ev.total===1?'':'s'}${ev.cover.at ? ' • updated '+ new Date(ev.cover.at).toLocaleString() : ''}</div>`;
+    const actions = document.createElement('div'); actions.className = 'row';
+    const openBtn = document.createElement('button'); openBtn.className='btn'; openBtn.textContent='Open';
+    openBtn.onclick = () => {
+      setQueryParam('e', ev.id);
+      activeEventId = ev.id;
+      eventTitle = ev.title;
+      renderAll();
+      window.scrollTo({top:0,behavior:'smooth'});
+    };
+    const qrBtn = document.createElement('a'); qrBtn.className='btn'; qrBtn.href = qrURLFor(ev.id); qrBtn.target='_blank'; qrBtn.rel='noreferrer'; qrBtn.textContent='Show QR';
+    actions.append(openBtn, qrBtn);
+    const row = document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;align-items:center';
+    row.append(left, actions);
+    cap.append(row);
+    fig.appendChild(cap);
+    grid.appendChild(fig);
+  });
+
+  box.innerHTML = '';
+  box.appendChild(grid);
+}
+
+    const eventsBtn = document.getElementById('eventsBtn');
+const eventsSec = document.getElementById('eventsSec');
+const hideEventsBtn = document.getElementById('hideEventsBtn');
+
+eventsBtn.addEventListener('click', async () => {
+  eventsSec.style.display = '';
+  await renderEventsList();
+  eventsSec.scrollIntoView({ behavior: 'smooth' });
+});
+
+hideEventsBtn.addEventListener('click', () => {
+  eventsSec.style.display = 'none';
+});
+    
     async function renderAll() {
       renderHeader();
       await renderGallery();
     }
 
     // Actions
-    newEventBtn.addEventListener('click', () => {
-      const id = uid();
-      activeEventId = id;
-      eventTitle = '';
-      setQueryParam('e', id);
-      renderAll();
-    });
+   newEventBtn.addEventListener('click', async () => {
+  const id = uid();
+  activeEventId = id;
+  eventTitle = 'Gallery ' + id;
+  setQueryParam('e', id);
+  // Create a row in events table so it appears in Past Events
+  try { await createEventRow(id, eventTitle); } catch(e) {}
+  renderAll();
+});
+
 
     copyLinkBtn.addEventListener('click', async () => {
       await navigator.clipboard.writeText(shareUrlForCurrent());
       alert('Link copied!');
     });
 
-    renameBtn.addEventListener('click', () => {
-      if (!activeEventId) return;
-      const next = prompt('Gallery name', eventTitle || 'Event Gallery');
-      if (next) { eventTitle = next; renderHeader(); }
-    });
+   renameBtn.addEventListener('click', async () => {
+  if (!activeEventId) return;
+  const next = prompt('Gallery name', eventTitle || 'Event Gallery');
+  if (next) {
+    eventTitle = next;
+    renderHeader();
+    try { await updateEventTitleRow(activeEventId, next); } catch(e) {}
+  }
+});
 
     viewBtn.addEventListener('click', () => {
       if (!activeEventId) { alert('Create or open an event first.'); return; }
