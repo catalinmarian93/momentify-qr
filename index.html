@@ -17,11 +17,12 @@
     .muted { color:var(--m); font-size:12px; }
     .grid { display:grid; gap:12px; }
     .grid-2 { grid-template-columns: 1fr 1fr; }
-    .thumb { border:1px solid var(--bd); border-radius:12px; overflow:hidden; }
+    .thumb { border:1px solid var(--bd); border-radius:12px; overflow:hidden; background:#fff; }
     .thumb img, .thumb video { width:100%; height:180px; object-fit:cover; display:block; }
     .thumb figcaption { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; }
     input[type="text"]{ padding:10px 12px; border:1px solid var(--bd); border-radius:10px; width:100% }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break:break-all; background:#f3f4f6; padding:6px 8px; border-radius:8px }
+    a.inline { text-decoration: underline; color:#111; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -30,7 +31,7 @@
     <header class="row between">
       <div>
         <h1 style="margin:0 0 4px 0; font-size:24px">Momentify — QR Gallery (Cloud)</h1>
-        <div class="muted">Flow: New Event → scan QR → shared photos/videos for that event</div>
+        <div class="muted">New Event → share QR → guests upload photos/videos → everyone sees the same gallery.</div>
       </div>
       <div class="row">
         <button id="eventsBtn" class="btn">View Past Events</button>
@@ -49,7 +50,7 @@
           <div class="card" style="padding:8px"><img id="qrImg" alt="QR code" width="96" height="96" /></div>
           <div class="muted" style="max-width:260px">
             <div style="font-weight:600; color:#111">Figurine QR (simulated)</div>
-            Scan with phone camera to open the event link.
+            Guests scan with their phone camera to open the event.
           </div>
         </div>
       </div>
@@ -71,7 +72,7 @@
     </section>
 
     <section class="card" style="margin-top:12px">
-      <div style="font-weight:600; font-size:14px; margin-bottom:6px">Event link (for native camera QR scan)</div>
+      <div style="font-weight:600; font-size:14px; margin-bottom:6px">Event link (QR target)</div>
       <div class="muted">Share this link. Scanning the QR opens it with the event ID.</div>
       <div id="shareUrl" class="mono" style="margin-top:6px"></div>
     </section>
@@ -87,7 +88,10 @@
     <section id="eventsSec" style="margin-top:16px; display:none">
       <div class="row" style="justify-content:space-between;align-items:center">
         <h2 style="margin:0">Past Events</h2>
-        <button id="hideEventsBtn" class="btn">Hide</button>
+        <div class="row">
+          <button id="refreshEventsBtn" class="btn">Refresh</button>
+          <button id="hideEventsBtn" class="btn">Hide</button>
+        </div>
       </div>
       <div id="eventsGrid" style="margin-top:12px"></div>
     </section>
@@ -105,11 +109,37 @@
 
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-    // Helpers
+    // ---------- Helpers ----------
     const uid = () => Math.random().toString(36).slice(2,8).toUpperCase();
-    const isVideoURL = (url) => /\.(mp4|mov|webm|ogg|mkv)$/i.test(url) || url.includes('video');
+    const VIDEO_EXT_RE = /\.(mp4|mov|m4v|webm|ogv|ogg|3gp|3g2|mkv)$/i;
+    const isVideoURL = (url) => VIDEO_EXT_RE.test(url);
 
-    // Elements
+    // Normalize extension from MIME (fixes iPhone video/quicktime, HEIC, etc.)
+    function extFromFile(file) {
+      const mt = (file.type || '').toLowerCase();
+      if (mt.startsWith('video/')) {
+        if (mt.includes('mp4')) return 'mp4';
+        if (mt.includes('quicktime')) return 'mov';   // iPhone default
+        if (mt.includes('webm')) return 'webm';
+        if (mt.includes('ogg')) return 'ogv';
+        if (mt.includes('x-m4v')) return 'm4v';
+        if (mt.includes('3gpp2')) return '3g2';
+        if (mt.includes('3gpp')) return '3gp';
+        if (mt.includes('x-matroska') || mt.includes('mkv')) return 'mkv';
+        return 'mp4';
+      }
+      if (mt.startsWith('image/')) {
+        if (mt.includes('jpeg')) return 'jpg';
+        if (mt.includes('png')) return 'png';
+        if (mt.includes('gif')) return 'gif';
+        if (mt.includes('webp')) return 'webp';
+        if (mt.includes('heic') || mt.includes('heif')) return 'heic'; // may not preview on Windows
+        return 'jpg';
+      }
+      return 'bin';
+    }
+
+    // ---------- Elements ----------
     const activeEventEl = document.getElementById('activeEvent');
     const eventTitleEl  = document.getElementById('eventTitle');
     const eventIdTextEl = document.getElementById('eventIdText');
@@ -126,13 +156,14 @@
     const eventsBtn     = document.getElementById('eventsBtn');
     const eventsSec     = document.getElementById('eventsSec');
     const hideEventsBtn = document.getElementById('hideEventsBtn');
+    const refreshEventsBtn = document.getElementById('refreshEventsBtn');
 
-    // State
+    // ---------- State ----------
     const qs = new URLSearchParams(location.search);
     let activeEventId = (qs.get('e') || '').toUpperCase();
-    let eventTitle = ""; // client label (also stored in events table)
+    let eventTitle = ""; // also stored in events table
 
-    // URL/QR helpers
+    // ---------- URL / QR ----------
     function setQueryParam(key, val) {
       const sp = new URLSearchParams(location.search);
       if (!val) sp.delete(key); else sp.set(key, val);
@@ -147,14 +178,47 @@
       qrImg.src = api;
     }
 
+    // ---------- Supabase helpers ----------
+    async function listPhotos(eventId) {
+      const { data, error } = await sb
+        .from('photos')
+        .select('*')
+        .eq('event_id', eventId)
+        .order('at', { ascending: false });
+      if (error) { console.error(error); return []; }
+      return data.map(row => ({
+        by: row.by,
+        at: row.at,
+        url: sb.storage.from(BUCKET).getPublicUrl(row.path).data.publicUrl
+      }));
+    }
+
+    async function uploadPhoto(eventId, file, by) {
+      const id = uid();
+      const ext = extFromFile(file);
+      const path = `${eventId}/${id}.${ext}`;
+      const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, {
+        upsert: false,
+        contentType: file.type || 'application/octet-stream'
+      });
+      if (upErr) throw upErr;
+      const { error: insErr } = await sb.from('photos').insert({ event_id: eventId, by, path });
+      if (insErr) throw insErr;
+      return path;
+    }
+
     // ---- EVENTS table helpers ----
     async function createEventRow(id, title) {
-      const { error } = await sb.from('events').insert({ id, title });
-      if (error) console.error(error);
+      const { data, error } = await sb.from('events').insert({ id, title });
+      if (error) {
+        console.error('Insert event failed:', error);
+      } else {
+        console.log('Event inserted:', data);
+      }
     }
     async function updateEventTitleRow(id, title) {
       const { error } = await sb.from('events').update({ title }).eq('id', id);
-      if (error) console.error(error);
+      if (error) console.error('Rename event failed:', error);
     }
     async function listEventsWithMeta(limit = 200) {
       const { data: events, error } = await sb
@@ -162,7 +226,7 @@
         .select('*')
         .order('created_at', { ascending: false })
         .limit(limit);
-      if (error) { console.error(error); return []; }
+      if (error) { console.error('List events failed:', error); return []; }
 
       async function getCount(eid) {
         const { count, error } = await sb
@@ -196,37 +260,7 @@
       return 'https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=' + encodeURIComponent(link);
     }
 
-    // Photos list
-    async function listPhotos(eventId) {
-      const { data, error } = await sb
-        .from('photos')
-        .select('*')
-        .eq('event_id', eventId)
-        .order('at', { ascending: false });
-      if (error) { console.error(error); return []; }
-      return data.map(row => ({
-        by: row.by,
-        at: row.at,
-        url: sb.storage.from(BUCKET).getPublicUrl(row.path).data.publicUrl
-      }));
-    }
-
-    // Upload (image or video)
-    async function uploadPhoto(eventId, file, by) {
-      const id = uid();
-      const ext = (file.type && file.type.split('/')[1]) ? file.type.split('/')[1] : 'jpg';
-      const path = `${eventId}/${id}.${ext}`;
-      const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, {
-        upsert: false,
-        contentType: file.type || 'application/octet-stream'
-      });
-      if (upErr) throw upErr;
-      const { error: insErr } = await sb.from('photos').insert({ event_id: eventId, by, path });
-      if (insErr) throw insErr;
-      return path;
-    }
-
-    // UI
+    // ---------- UI ----------
     function renderHeader() {
       shareUrlEl.textContent = shareUrlForCurrent();
       if (!activeEventId) { activeEventEl.style.display = 'none'; return; }
@@ -242,28 +276,48 @@
         gallerySec.innerHTML = '<div class="card">No event selected yet. Click <b>New Event</b> to start.</div>';
         return;
       }
-      const photos = await listPhotos(activeEventId);
-      if (!photos.length) {
+      const items = await listPhotos(activeEventId);
+      if (!items.length) {
         gallerySec.innerHTML = '<div class="card">No media yet — be the first to add one!</div>';
         return;
       }
       const grid = document.createElement('div');
       grid.className = 'grid';
       grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(180px, 1fr))';
-      photos.forEach(p => {
+      items.forEach(p => {
         const fig = document.createElement('figure'); fig.className = 'thumb';
-        let media;
-        if (isVideoURL(p.url)) {
-          media = document.createElement('video');
-          media.src = p.url; media.controls = true; media.playsInline = true;
+        const isVid = isVideoURL(p.url);
+
+        if (isVid) {
+          const v = document.createElement('video');
+          v.src = p.url;
+          v.controls = true;
+          v.playsInline = true;
+          // Fallback if codec unsupported
+          v.addEventListener('error', () => {
+            const link = document.createElement('a');
+            link.href = p.url; link.target = '_blank'; link.rel = 'noreferrer';
+            link.className = 'inline'; link.textContent = 'Download video (codec not supported here)';
+            fig.insertBefore(link, fig.firstChild);
+          });
+          fig.appendChild(v);
         } else {
-          media = document.createElement('img');
-          media.src = p.url; media.alt='moment';
+          const img = document.createElement('img');
+          img.src = p.url; img.alt='moment';
+          // Fallback for unsupported formats (e.g., HEIC on Windows)
+          img.addEventListener('error', () => {
+            const link = document.createElement('a');
+            link.href = p.url; link.target = '_blank'; link.rel = 'noreferrer';
+            link.className = 'inline'; link.textContent = 'Open media (format not previewable here)';
+            fig.insertBefore(link, fig.firstChild);
+          });
+          fig.appendChild(img);
         }
+
         const cap = document.createElement('figcaption'); cap.className = 'muted';
         const left = document.createElement('span'); left.textContent = (p.by || 'Guest'); left.style.maxWidth='120px'; left.style.overflow='hidden'; left.style.textOverflow='ellipsis'; left.style.whiteSpace='nowrap';
         const t = document.createElement('time'); t.className='mono'; t.textContent = new Date(p.at).toLocaleTimeString();
-        cap.append(left, t); fig.append(media, cap); grid.append(fig);
+        cap.append(left, t); fig.append(cap); grid.append(fig);
       });
       gallerySec.innerHTML = ''; gallerySec.append(grid);
     }
@@ -274,13 +328,21 @@
 
       const items = await listEventsWithMeta();
       if (!items.length) {
-        box.innerHTML = '<div class="card">No events yet. Click <b>New Event</b> to create one.</div>';
+        box.innerHTML = `
+          <div class="card">
+            No events found yet.<br/><br/>
+            If you already clicked <b>New Event</b> and renamed it (e.g., "Event 1", "Event 2") but nothing shows here,
+            make sure your Supabase has these policies on <code>public.events</code>:<br/><br/>
+            <span class="mono">create policy "Public read events" on public.events for select to public using (true);</span><br/>
+            <span class="mono">create policy "Public insert events" on public.events for insert to public with check (true);</span><br/>
+            (optional for rename) <span class="mono">create policy "Public update event title" on public.events for update to public using (true) with check (true);</span>
+          </div>`;
         return;
       }
 
       const grid = document.createElement('div');
       grid.className = 'grid';
-      grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(180px, 1fr))';
+      grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
 
       items.forEach(ev => {
         const fig = document.createElement('figure'); fig.className = 'thumb';
@@ -324,7 +386,7 @@
       await renderGallery();
     }
 
-    // Actions
+    // ---------- Actions ----------
     newEventBtn.addEventListener('click', async () => {
       const id = uid();
       activeEventId = id;
@@ -375,7 +437,7 @@
       }
     });
 
-    // Past events show/hide
+    // Past events show/hide/refresh
     eventsBtn.addEventListener('click', async () => {
       eventsSec.style.display = '';
       await renderEventsList();
@@ -384,8 +446,11 @@
     hideEventsBtn.addEventListener('click', () => {
       eventsSec.style.display = 'none';
     });
+    refreshEventsBtn.addEventListener('click', async () => {
+      await renderEventsList();
+    });
 
-    // Boot
+    // ---------- Boot ----------
     renderAll();
   </script>
 </body>
